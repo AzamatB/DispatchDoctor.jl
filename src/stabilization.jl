@@ -22,7 +22,7 @@ using .._Interactions:
     IncompatibleMacro,
     CompatibleMacro,
     DontPropagateMacro
-using .._RuntimeChecks: is_precompiling, checking_enabled
+using .._RuntimeChecks: is_precompiling, checking_enabled, inference_enabled
 using .._ParseOptions: parse_options
 
 function _stable(args...; calling_module, source_info, kws...)
@@ -353,6 +353,9 @@ function _stabilize_fnc(
     ignore = haskey(func, :name) ? :($(ignore_function)(var"#self#")) : :(false)
     # (Qualified, as the calling module may be a `baremodule` without Base.)
     not = GlobalRef(Base, :!)
+    # Only checked once the return type is found to be unstable, and at
+    # runtime, as the module's `infer=false` may be set after this definition:
+    this_module = Expr(:macrocall, GlobalRef(Base, Symbol("@__MODULE__")), nothing)
 
     # The simulator keeps the original body, including its source lines:
     # macros such as `@__DIR__`, `@__FILE__` and command literals expand
@@ -361,7 +364,10 @@ function _stabilize_fnc(
     func_simulator[:name] = simulator
     func[:body] = @q begin
         $T = $infer
-        if $(checker) && $not($ignore) && $(checking_enabled)()
+        if $(checker) &&
+            $not($ignore) &&
+            $(checking_enabled)() &&
+            $(inference_enabled)($this_module)
             $err
         end
 
