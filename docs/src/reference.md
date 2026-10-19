@@ -25,6 +25,16 @@ incompatible with `@stable`, you can use `register_macro!`:
 register_macro!
 ```
 
+## Programmatic use
+
+To apply `@stable` to expressions from code, for example as the
+`mapexpr` of `include`:
+
+```@docs
+DispatchDoctor.stabilize_expression
+DispatchDoctor.stabilization_options
+```
+
 ## Internals
 
 ```@docs

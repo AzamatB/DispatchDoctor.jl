@@ -4,6 +4,7 @@ module _Stabilization
 using MacroTools: @capture, @q, combinedef, splitdef, isdef, longdef
 
 using .._Utils:
+    JULIA_OK,
     specializing_typeof,
     map_specializing_typeof,
     specializing_kwargs_typeof,
@@ -24,6 +25,8 @@ using .._Interactions:
     DontPropagateMacro
 using .._RuntimeChecks: is_precompiling, checking_enabled, inference_enabled
 using .._ParseOptions: parse_options
+using .._Preferences:
+    GLOBAL_DEFAULT_MODE, GLOBAL_DEFAULT_CODEGEN_LEVEL, GLOBAL_DEFAULT_UNION_LIMIT
 
 function _stable(args...; calling_module, source_info, kws...)
     raw_options, ex = args[begin:(end - 1)], args[end]
@@ -181,14 +184,16 @@ function _stabilizing_include(m::Module, path; kws...)
 end
 
 function _stabilize_module(ex, downward_metadata; calling_module::Module=Core.Main, kws...)
+    # (The body is last: newer parsers put a syntax version before the other arguments.)
     stabilized_args = map(
-        e -> _stabilize_all(e, DownwardMetadata(); calling_module, kws...), ex.args[3].args
+        e -> _stabilize_all(e, DownwardMetadata(); calling_module, kws...),
+        ex.args[end].args,
     )
     merged_upward_metadata = reduce(
         merge, map(last, stabilized_args); init=UpwardMetadata()
     )
     new_ex = Expr(
-        :module, ex.args[1], ex.args[2], Expr(:block, map(first, stabilized_args)...)
+        :module, ex.args[1:(end - 1)]..., Expr(:block, map(first, stabilized_args)...)
     )
     return new_ex,
     UpwardMetadata(
@@ -397,6 +402,82 @@ end
 function _starts_with(body, line::LineNumberNode)
     body isa Expr && body.head == :block && !isempty(body.args) || return false
     return body.args[1] == line
+end
+
+"""
+    stabilization_options(
+        mod::Module;
+        default_mode="error", default_codegen_level="debug", default_union_limit=1,
+    )
+
+The options `(; mode, union_limit, codegen_level)` that `@stable` would use in
+module `mod`, given these defaults (the `default_*` options of `@stable`).
+They are resolved exactly as `@stable` resolves them: preferences of the package
+that `mod` belongs to (e.g. `dispatch_doctor_mode` in its `LocalPreferences.toml`)
+override the defaults. When the mode is `"disable"`, the other two are the defaults.
+"""
+function stabilization_options(
+    mod::Module;
+    default_mode::String=GLOBAL_DEFAULT_MODE,
+    default_codegen_level::String=GLOBAL_DEFAULT_CODEGEN_LEVEL,
+    default_union_limit::Int=GLOBAL_DEFAULT_UNION_LIMIT,
+)
+    raw_options = (
+        Expr(:(=), :default_mode, default_mode),
+        Expr(:(=), :default_codegen_level, default_codegen_level),
+        Expr(:(=), :default_union_limit, default_union_limit),
+    )
+    options = parse_options(raw_options, mod)
+    return (; options.mode, options.union_limit, options.codegen_level)
+end
+
+"""
+    stabilize_expression(
+        mod::Module, ex;
+        default_mode="error", default_codegen_level="debug", default_union_limit=1,
+        source_info=nothing,
+    )
+
+Return the expression `ex` with `@stable` applied, as if it had been written as
+`@stable default_mode=... begin ex end` in module `mod`:
+
+- options are resolved like those of `@stable` (see [`stabilization_options`](@ref)),
+  and `ex` is returned unchanged when the mode is `"disable"` or `@stable` is
+  disabled on this Julia version;
+- `module` expressions are stabilized recursively, and `include(path)` calls
+  include the file with the same options;
+- `source_info` is used as the location of definitions without any line information;
+- unlike `@stable`, there is no warning when `ex` contains no functions to stabilize.
+
+Since it applies to any single expression, it can be used as the `mapexpr` of `include`:
+
+```julia
+include(ex -> DispatchDoctor.stabilize_expression(@__MODULE__, ex), "file.jl")
+```
+"""
+function stabilize_expression(
+    mod::Module,
+    ex;
+    default_mode::String=GLOBAL_DEFAULT_MODE,
+    default_codegen_level::String=GLOBAL_DEFAULT_CODEGEN_LEVEL,
+    default_union_limit::Int=GLOBAL_DEFAULT_UNION_LIMIT,
+    source_info::Union{LineNumberNode,Nothing}=nothing,
+)
+    JULIA_OK || return ex
+    options = stabilization_options(
+        mod; default_mode, default_codegen_level, default_union_limit
+    )
+    options.mode in ("error", "warn") || return ex
+    out, _ = _stabilize_all(
+        ex,
+        DownwardMetadata();
+        calling_module=mod,
+        source_info,
+        options.mode,
+        options.codegen_level,
+        options.union_limit,
+    )
+    return out
 end
 
 end

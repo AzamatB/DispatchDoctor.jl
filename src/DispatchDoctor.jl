@@ -2,6 +2,12 @@ module DispatchDoctor
 
 export @stable, @unstable, allow_unstable, TypeInstabilityError, register_macro!
 
+"""
+Revision of the fixes and helpers that DispatchCheckup relies on
+(`stabilize_expression`, `stabilization_options` and the generated-code fixes).
+"""
+const DISPATCHCHECKUP_PATCHLEVEL = 1
+
 include("utils.jl")
 include("errors.jl")
 include("printing.jl")
@@ -20,6 +26,7 @@ using ._Printing
 using ._Interactions: MACRO_BEHAVIOR, MacroInteractions, CompatibleMacro, IncompatibleMacro, DontPropagateMacro, register_macro!, get_macro_behavior, ignore_function
 using ._RuntimeChecks: INSTABILITY_CHECK_ENABLED, allow_unstable, is_precompiling
 using ._Stabilization: _stable, _stabilize_all, _stabilize_fnc, _stabilize_module
+using ._Stabilization: stabilize_expression, stabilization_options
 using ._Macros: @stable, @unstable
 #! format: on
 

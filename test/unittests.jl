@@ -1821,4 +1821,71 @@ end
     end
 end
 
+@testitem "programmatic stabilization" begin
+    using DispatchDoctor
+    using DispatchDoctor: stabilize_expression, stabilization_options
+    using Suppressor: @capture_err
+
+    @test DispatchDoctor.DISPATCHCHECKUP_PATCHLEVEL == 1
+
+    # Options are resolved like those of `@stable`:
+    @test stabilization_options(Main) ==
+        (; mode="error", union_limit=1, codegen_level="debug")
+    @test stabilization_options(
+        Main; default_mode="warn", default_codegen_level="min", default_union_limit=2
+    ) == (; mode="warn", union_limit=2, codegen_level="min")
+    @test_throws ErrorException stabilization_options(Main; default_mode="bad")
+    # ... with the package's preferences overriding the defaults:
+    push!(LOAD_PATH, joinpath(@__DIR__, "FakePackage1"))
+    push!(LOAD_PATH, joinpath(@__DIR__, "FakePackage3"))
+    using FakePackage1, FakePackage3
+    @test stabilization_options(FakePackage1; default_mode="warn") ==
+        (; mode="a", union_limit=3, codegen_level="b")
+    @test stabilization_options(FakePackage3; default_union_limit=2) ==
+        (; mode="error", union_limit=2, codegen_level="debug")
+
+    for codegen_level in ("debug", "min")
+        m = @eval module $(gensym(:Target)) end
+        stabilize(ex; kws...) =
+            stabilize_expression(m, ex; default_codegen_level=codegen_level, kws...)
+        # (Look the functions up in the latest world, as they are defined at runtime.)
+        function call(path, args...)
+            f = foldl((x, n) -> Base.invokelatest(getglobal, x, n), path; init=m)
+            return Base.invokelatest(f, args...)
+        end
+
+        Core.eval(m, stabilize(:(f(x) = x > 0 ? x : 0.0)))
+        Core.eval(m, stabilize(:(g(x) = x > 0 ? x : 0.0); default_union_limit=2))
+        Core.eval(m, stabilize(:(module Sub
+        h(x) = x > 0 ? x : 0.0
+        end)))
+        @test call((:g,), 1) == 1
+        if DispatchDoctor.JULIA_OK
+            @test_throws TypeInstabilityError call((:f,), 1)
+            @test_throws TypeInstabilityError call((:Sub, :h), 1)
+        end
+
+        # Nothing to stabilize: unchanged, and no warning
+        msg = @capture_err @test stabilize(:(x = 1)) == :(x = 1)
+        @test isempty(msg)
+        ex = :(k(x) = x > 0 ? x : 0.0)
+        @test stabilize(ex; default_mode="disable") === ex
+
+        # As the `mapexpr` of `include`, including nested includes:
+        mktempdir() do dir
+            write(joinpath(dir, "inner.jl"), "inner(x) = x > 0 ? x : 0.0\n")
+            write(
+                joinpath(dir, "outer.jl"),
+                "outer(x) = x > 0 ? x : 0.0\ninclude(\"inner.jl\")\nouter_stable(x) = x\n",
+            )
+            Base.include(stabilize, m, joinpath(dir, "outer.jl"))
+        end
+        @test call((:outer_stable,), 1) == 1
+        if DispatchDoctor.JULIA_OK
+            @test_throws TypeInstabilityError call((:outer,), 1)
+            @test_throws TypeInstabilityError call((:inner,), 1)
+        end
+    end
+end
+
 @run_package_tests
