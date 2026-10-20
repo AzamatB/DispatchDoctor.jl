@@ -39,6 +39,7 @@ function _cached_call(f::F, cache::Cache, key) where {F}
         end
     end
 end
+_cached_get_uuid(uuid::Base.UUID) = uuid  # (a package given by its UUID)
 function _cached_get_uuid(m)
     _cached_call(UUID_CACHE, objectid(m)) do
         try

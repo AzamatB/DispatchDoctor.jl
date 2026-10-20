@@ -1847,6 +1847,11 @@ end
         (; mode="a", union_limit=3, codegen_level="b")
     @test stabilization_options(FakePackage3; default_union_limit=2) ==
         (; mode="error", union_limit=2, codegen_level="debug")
+    # ... also for a package given by its UUID:
+    @test stabilization_options(Base.PkgId(FakePackage1).uuid; default_mode="warn") ==
+        (; mode="a", union_limit=3, codegen_level="b")
+    @test stabilization_options(Base.UUID(0); default_mode="warn") ==
+        (; mode="warn", union_limit=1, codegen_level="debug")
 
     for codegen_level in ("debug", "min")
         m = @eval module $(gensym(:Target)) end

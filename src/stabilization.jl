@@ -26,7 +26,10 @@ using .._Interactions:
 using .._RuntimeChecks: is_precompiling, checking_enabled, inference_enabled
 using .._ParseOptions: parse_options
 using .._Preferences:
-    GLOBAL_DEFAULT_MODE, GLOBAL_DEFAULT_CODEGEN_LEVEL, GLOBAL_DEFAULT_UNION_LIMIT
+    GLOBAL_DEFAULT_MODE,
+    GLOBAL_DEFAULT_CODEGEN_LEVEL,
+    GLOBAL_DEFAULT_UNION_LIMIT,
+    get_all_preferred
 
 function _stable(args...; calling_module, source_info, kws...)
     raw_options, ex = args[begin:(end - 1)], args[end]
@@ -406,7 +409,7 @@ end
 
 """
     stabilization_options(
-        mod::Module;
+        mod::Union{Module,Base.UUID};
         default_mode="error", default_codegen_level="debug", default_union_limit=1,
     )
 
@@ -415,9 +418,10 @@ module `mod`, given these defaults (the `default_*` options of `@stable`).
 They are resolved exactly as `@stable` resolves them: preferences of the package
 that `mod` belongs to (e.g. `dispatch_doctor_mode` in its `LocalPreferences.toml`)
 override the defaults. When the mode is `"disable"`, the other two are the defaults.
+`mod` can also be the UUID of a package, which need not be loaded.
 """
 function stabilization_options(
-    mod::Module;
+    mod::Union{Module,Base.UUID};
     default_mode::String=GLOBAL_DEFAULT_MODE,
     default_codegen_level::String=GLOBAL_DEFAULT_CODEGEN_LEVEL,
     default_union_limit::Int=GLOBAL_DEFAULT_UNION_LIMIT,
@@ -427,7 +431,11 @@ function stabilization_options(
         Expr(:(=), :default_codegen_level, default_codegen_level),
         Expr(:(=), :default_union_limit, default_union_limit),
     )
-    options = parse_options(raw_options, mod)
+    # As in `parse_options(raw_options, mod)`, which only takes a module:
+    options = parse_options(raw_options, Core.Main)
+    if mod != Core.Main
+        options = get_all_preferred(options, mod)
+    end
     return (; options.mode, options.union_limit, options.codegen_level)
 end
 
