@@ -17,10 +17,15 @@ mktempdir() do tempdir
     project_toml_path = joinpath(dest_dir, "Project.toml")
     toml_content = TOML.parsefile(project_toml_path)
     toml_content["compat"]["DispatchDoctor"] = "=$dd_version"
-    # (This fork has its own UUID.)
-    toml_content["deps"]["DispatchDoctor"] = dd_toml_content["uuid"]
     open(project_toml_path, "w") do io
         TOML.print(io, toml_content)
+    end
+    # This fork has its own UUID: make DynamicExpressions and its tests use it.
+    registered_uuid = "8d63f2c5-f18a-4cf2-ba9d-b3f60fc568c8"
+    for path in (project_toml_path, joinpath(dest_dir, "test", "Project.toml"))
+        isfile(path) || continue
+        s = read(path, String)
+        write(path, replace(s, registered_uuid => dd_toml_content["uuid"]))
     end
 
     # Julia 1.12 world-age workaround:
