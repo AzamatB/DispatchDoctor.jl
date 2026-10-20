@@ -10,8 +10,10 @@ DispatchDoctor instead of replacing it.
 
 - 1: the generated-code fixes, `stabilize_expression` and `stabilization_options`.
 - 2: the registered DispatchDoctor's `allow_unstable` also pauses this fork's checks.
+- 3: the registered DispatchDoctor's flag is captured once, when either package loads,
+  so the checks take no lock (threads can run checked code inside its `allow_unstable`).
 """
-const DISPATCHCHECKUP_PATCHLEVEL = 2
+const DISPATCHCHECKUP_PATCHLEVEL = 3
 
 include("utils.jl")
 include("errors.jl")

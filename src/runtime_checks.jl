@@ -25,6 +25,12 @@ const REGISTERED_DISPATCHDOCTOR = Base.PkgId(
 )
 
 """
+The flag of the registered DispatchDoctor's `allow_unstable`, once that package is
+loaded (see `registered_checking_enabled`), else `nothing`.
+"""
+const REGISTERED_FLAG = Ref{Union{Nothing,Base.RefValue{Bool}}}(nothing)
+
+"""
     registered_checking_enabled()
 
 `false` while the registered DispatchDoctor is loaded and its own `allow_unstable`
@@ -32,29 +38,45 @@ runs, else `true`. Code written against the registered package, such as a
 package's tests, pauses checks with its `allow_unstable`; as this fork is a
 separate package, its checks would otherwise not notice.
 
-The registered package is looked up in `Base.loaded_modules` at call time, which
-the generated code only reaches once a return type was found to be unstable. This
-never throws, and returns `true` (leaving it to this fork's own flag) when the
-registered package is not loaded, when its internals differ from those of 0.4.x,
-and when another task holds `Base.require_lock` (it does not wait for that task,
-as the task may be loading a package whose `__init__` waits for this one).
+It reads the registered package's flag, which `capture_registered_flag` keeps in
+`REGISTERED_FLAG` when that package loads, so it takes no lock and looks nothing
+up: any number of threads can run checked code inside one `allow_unstable` of the
+registered package. It never throws, and returns `true` (leaving it to this fork's
+own flag) when no flag was captured.
 """
 @noinline function registered_checking_enabled()
+    flag = REGISTERED_FLAG[]
+    return flag === nothing || flag[]
+end
+
+"""
+    capture_registered_flag(pkg::Base.PkgId)
+
+When `pkg` is the registered DispatchDoctor and it is loaded, keep the flag of its
+`allow_unstable` in `REGISTERED_FLAG`. It runs from `__init__` (if that package was
+loaded first) and from `Base.package_callbacks` (when it loads later). It never
+throws, and leaves `REGISTERED_FLAG` as it was when the package is not loaded or
+when its internals differ from those of 0.4.x.
+"""
+function capture_registered_flag(pkg::Base.PkgId)
+    pkg == REGISTERED_DISPATCHDOCTOR || return nothing
     try
-        trylock(Base.require_lock) || return true
-        registered = try
-            get(Base.loaded_modules, REGISTERED_DISPATCHDOCTOR, nothing)
-        finally
-            unlock(Base.require_lock)
-        end
-        registered isa Module || return true
-        # (In the latest world, as the package may have been loaded after the caller.)
+        registered = @lock Base.require_lock get(Base.loaded_modules, pkg, nothing)
+        registered isa Module || return nothing
+        # (In the latest world, as the package was loaded after this one's code.)
         checks = Base.invokelatest(getglobal, registered, :_RuntimeChecks)
         flag = Base.invokelatest(getglobal, checks, :INSTABILITY_CHECK_ENABLED).value
-        return flag isa Base.RefValue{Bool} ? flag[] : true
+        flag isa Base.RefValue{Bool} && (REGISTERED_FLAG[] = flag)
     catch
-        return true
     end
+    return nothing
+end
+
+# Capture the registered DispatchDoctor's flag when it loads, or now if it is loaded.
+function __init__()
+    push!(Base.package_callbacks, capture_registered_flag)
+    capture_registered_flag(REGISTERED_DISPATCHDOCTOR)
+    return nothing
 end
 
 """
