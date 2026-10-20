@@ -1827,6 +1827,10 @@ end
     using Suppressor: @capture_err
 
     @test DispatchDoctor.DISPATCHCHECKUP_PATCHLEVEL == 1
+    # This fork has its own UUID, so that it never replaces the registered
+    # DispatchDoctor of the packages in an environment that also has it.
+    @test Base.PkgId(DispatchDoctor).uuid !=
+        Base.UUID("8d63f2c5-f18a-4cf2-ba9d-b3f60fc568c8")
 
     # Options are resolved like those of `@stable`:
     @test stabilization_options(Main) ==

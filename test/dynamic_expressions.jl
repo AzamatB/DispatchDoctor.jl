@@ -17,6 +17,8 @@ mktempdir() do tempdir
     project_toml_path = joinpath(dest_dir, "Project.toml")
     toml_content = TOML.parsefile(project_toml_path)
     toml_content["compat"]["DispatchDoctor"] = "=$dd_version"
+    # (This fork has its own UUID.)
+    toml_content["deps"]["DispatchDoctor"] = dd_toml_content["uuid"]
     open(project_toml_path, "w") do io
         TOML.print(io, toml_content)
     end

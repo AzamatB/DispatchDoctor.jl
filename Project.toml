@@ -1,5 +1,5 @@
 name = "DispatchDoctor"
-uuid = "8d63f2c5-f18a-4cf2-ba9d-b3f60fc568c8"
+uuid = "c2bcafe0-aaa5-4bef-983d-8af4248d41f3"
 authors = ["MilesCranmer <miles.cranmer@gmail.com> and contributors"]
 version = "0.4.29"
 
