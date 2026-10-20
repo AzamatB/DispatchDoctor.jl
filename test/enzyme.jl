@@ -31,7 +31,10 @@ end
     @eval module CoverageRules
         using Enzyme: EnzymeRules
         using DispatchDoctor._RuntimeChecks:
-            is_precompiling, checking_enabled, inference_enabled
+            is_precompiling,
+            checking_enabled,
+            registered_checking_enabled,
+            inference_enabled
         using DispatchDoctor._Stabilization: _show_warning, _construct_pairs
         using DispatchDoctor._Utils:
             specializing_typeof,
@@ -47,6 +50,7 @@ end
             for f in [
                 is_precompiling,
                 checking_enabled,
+                registered_checking_enabled,
                 inference_enabled,
                 _show_warning,
                 _construct_pairs,

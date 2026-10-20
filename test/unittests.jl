@@ -1804,6 +1804,103 @@ end
     @test_throws TypeInstabilityError f()
 end
 
+@testitem "allow_unstable of the registered DispatchDoctor" begin
+    using DispatchDoctor
+    using DispatchDoctor: _RuntimeChecks
+
+    # This fork has its own UUID, so the registered DispatchDoctor can be loaded
+    # next to it, and code written against that one (such as a package's tests)
+    # pauses checks with its `allow_unstable`. Its flag is looked up while it is
+    # loaded; a stub module stands in for it here.
+    id = _RuntimeChecks.REGISTERED_DISPATCHDOCTOR
+    @test id ==
+        Base.PkgId(Base.UUID("8d63f2c5-f18a-4cf2-ba9d-b3f60fc568c8"), "DispatchDoctor")
+    @test Base.PkgId(DispatchDoctor) != id
+    original = @lock Base.require_lock get(Base.loaded_modules, id, nothing)
+    original === nothing && @test _RuntimeChecks.registered_checking_enabled()
+
+    function stub(body)
+        m = Module(:DispatchDoctor)
+        Core.eval(m, body)
+        return m
+    end
+    registered = stub(
+        :(module _RuntimeChecks
+        const INSTABILITY_CHECK_ENABLED = (; value=Ref(true), lock=ReentrantLock())
+        function allow_unstable(f)
+            INSTABILITY_CHECK_ENABLED.value[] = false
+            try
+                return f()
+            finally
+                INSTABILITY_CHECK_ENABLED.value[] = true
+            end
+        end
+        end)
+    )
+    checks = Base.invokelatest(getglobal, registered, :_RuntimeChecks)
+    registered_allow_unstable = Base.invokelatest(getglobal, checks, :allow_unstable)
+    flag = Base.invokelatest(getglobal, checks, :INSTABILITY_CHECK_ENABLED).value
+    register(m) = @lock Base.require_lock (Base.loaded_modules[id] = m)
+
+    @stable f(x) = x > 0 ? x : 0.0
+    try
+        register(registered)
+        @test _RuntimeChecks.registered_checking_enabled()
+        @test Base.invokelatest(registered_allow_unstable, () -> f(1)) == 1
+        @test flag[]
+        @test allow_unstable(() -> f(1)) == 1
+        if DispatchDoctor.JULIA_OK
+            @test_throws TypeInstabilityError f(1)
+        end
+
+        flag[] = false  # (as within its `allow_unstable`)
+        @test !_RuntimeChecks.registered_checking_enabled()
+        @test !_RuntimeChecks.checking_enabled()
+        @test f(1) == 1
+        # It does not wait for a task that is loading code:
+        locked, release = Channel{Nothing}(1), Channel{Nothing}(1)
+        holder = @async lock(Base.require_lock) do
+            put!(locked, nothing)
+            take!(release)
+        end
+        take!(locked)
+        checker = @async _RuntimeChecks.registered_checking_enabled()
+        finished = timedwait(() -> istaskdone(checker), 10.0)
+        put!(release, nothing)
+        wait(holder)
+        @test finished === :ok
+        @test fetch(checker) === true
+        flag[] = true
+
+        # With other internals, this fork's own flag decides, and nothing throws:
+        for body in (
+            :(nothing),
+            :(_RuntimeChecks = 1),
+            :(module _RuntimeChecks end),
+            :(module _RuntimeChecks
+            const INSTABILITY_CHECK_ENABLED = false
+            end),
+            :(module _RuntimeChecks
+            const INSTABILITY_CHECK_ENABLED = (; value=Ref{Any}(false))
+            end),
+        )
+            register(stub(body))
+            @test _RuntimeChecks.registered_checking_enabled()
+            @test allow_unstable(() -> f(1)) == 1
+            if DispatchDoctor.JULIA_OK
+                @test_throws TypeInstabilityError f(1)
+            end
+        end
+    finally
+        if original === nothing
+            @lock Base.require_lock delete!(Base.loaded_modules, id)
+        else
+            register(original)
+        end
+    end
+    @test (@lock Base.require_lock get(Base.loaded_modules, id, nothing)) === original
+end
+
 @testitem "macro behavior with `GlobalRef`" begin
     using DispatchDoctor
 
@@ -1826,7 +1923,7 @@ end
     using DispatchDoctor: stabilize_expression, stabilization_options
     using Suppressor: @capture_err
 
-    @test DispatchDoctor.DISPATCHCHECKUP_PATCHLEVEL == 1
+    @test DispatchDoctor.DISPATCHCHECKUP_PATCHLEVEL == 2
     # This fork has its own UUID, so that it never replaces the registered
     # DispatchDoctor of the packages in an environment that also has it.
     @test Base.PkgId(DispatchDoctor).uuid !=

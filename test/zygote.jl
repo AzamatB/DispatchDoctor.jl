@@ -30,6 +30,9 @@ is_precompiling(x) = _RuntimeChecks.is_precompiling()
 checking_enabled(x) = _RuntimeChecks.checking_enabled()
 @test only(gradient(checking_enabled, 1.0)) === nothing
 
+registered_checking_enabled(x) = _RuntimeChecks.registered_checking_enabled()
+@test only(gradient(registered_checking_enabled, 1.0)) === nothing
+
 inference_enabled(x) = _RuntimeChecks.inference_enabled(@__MODULE__)
 @test only(gradient(inference_enabled, 1.0)) === nothing
 

@@ -7,8 +7,11 @@ Revision of the fixes and helpers that DispatchCheckup relies on
 (`stabilize_expression`, `stabilization_options` and the generated-code fixes).
 This fork has its own UUID, so it is loaded alongside the registered
 DispatchDoctor instead of replacing it.
+
+- 1: the generated-code fixes, `stabilize_expression` and `stabilization_options`.
+- 2: the registered DispatchDoctor's `allow_unstable` also pauses this fork's checks.
 """
-const DISPATCHCHECKUP_PATCHLEVEL = 1
+const DISPATCHCHECKUP_PATCHLEVEL = 2
 
 include("utils.jl")
 include("errors.jl")
