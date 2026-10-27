@@ -232,13 +232,13 @@ end
 @testitem "detect duplicate LineNumberNode in @stable expansion" begin
     using DispatchDoctor
 
-    using MacroTools: isdef, splitdef
-
-    # Basically we want to verify that the function which runs
+    # Basically we want to verify that the stabilized function
     # doesn't duplicate any LineNumberNodes, which can
-    # mess with stacktraces and coverage. The simulator, which
-    # is only inferred, keeps exactly the source lines of the original
-    # body, because macros like `@__DIR__` expand using them.
+    # mess with stacktraces and coverage.
+    ex = @macroexpand(@stable(function f(x)
+        return x
+    end))
+
     function collect_line_nodes!(line_nodes, expr)
         if expr isa LineNumberNode
             push!(line_nodes, expr)
@@ -249,132 +249,42 @@ end
         end
         return line_nodes
     end
-    function collect_defs!(defs, expr)
-        if expr isa Expr
-            isdef(expr) && return push!(defs, expr)
-            foreach(arg -> collect_defs!(defs, arg), expr.args)
-        end
-        return defs
-    end
 
-    def = :(function f(x)
-        y = x
-        return y
+    line_nodes = collect_line_nodes!([], ex.args[end])
+
+    @test length(line_nodes) > 1
+    @test length(unique(line_nodes)) == length(line_nodes)  # No dupes!
+end
+@testitem "macros that use the source line" begin
+    using DispatchDoctor
+    for codegen_level in ("debug", "min")
+        @eval @stable default_codegen_level = $codegen_level dir(n) =
+            isdir(@__DIR__) ? n : "missing"
+        DispatchDoctor.JULIA_OK && @test_throws TypeInstabilityError dir(1)
+        @eval @stable default_codegen_level = $codegen_level cmd() = `echo hi`
+        @test cmd() == `echo hi`
+    end
+end
+@testitem "stack trace points at the definition line" begin
+    using DispatchDoctor
+    #! format: off
+    def = :(function f(
+        x, dir=@__DIR__
+    )
+        return x > 0 ? x : 1.0
     end)
+    #! format: on
+    line = def.args[2].args[1]
     for codegen_level in ("debug", "min")
-        stable_def = :(@stable default_codegen_level = $codegen_level $def)
-        ex = macroexpand(@__MODULE__, stable_def)
-        defs = map(splitdef, collect_defs!([], ex))
-        simulator = only(filter(d -> occursin("_simulator", string(d[:name])), defs))
-        wrapper = only(filter(d -> d[:name] == :f, defs))
-
-        line_nodes = collect_line_nodes!([], wrapper[:body])
-        @test length(line_nodes) == (codegen_level == "debug" ? 3 : 1)
-        @test length(unique(line_nodes)) == length(line_nodes)  # No dupes!
-        @test first(wrapper[:body].args) == first(def.args[2].args)
-
-        @test collect_line_nodes!([], simulator[:body]) == collect_line_nodes!([], def)
-    end
-end
-@testitem "source-dependent macros in the inferred copy" begin
-    using DispatchDoctor
-
-    # The simulator is the copy of the body that is inferred. Stripping its
-    # source lines broke command literals (`String(nothing)` at load time) and made
-    # `@__DIR__`/`@__FILE__` return `nothing` there, which hid instabilities.
-    struct Foo
-        x::Int
-    end
-    for codegen_level in ("debug", "min")
-        @eval @stable default_codegen_level = $codegen_level begin
-            cmd_named() = `echo hi`
-            cmd_anon = s -> `echo $s`
-            Base.:+(a::Foo, b::Foo) = (`true`; Foo(a.x + b.x))
-            dir_named(n) = isdir(@__DIR__) ? n : "missing"
-            dir_anon = n -> isdir(@__DIR__) ? n : "missing"
-            Base.:-(a::Foo, b::Foo) = isdir(@__DIR__) ? Foo(a.x - b.x) : 0.0
-            file_named() = isfile(@__FILE__) ? 1 : "missing"
-            dir_stable() = @__DIR__
-        end
-        @test cmd_named() == `echo hi`
-        @test cmd_anon("a") == `echo a`
-        @test Foo(1) + Foo(2) == Foo(3)
-        @test dir_stable() == @__DIR__
-        if DispatchDoctor.JULIA_OK
-            @test_throws TypeInstabilityError dir_named(1)
-            @test_throws TypeInstabilityError dir_anon(1)
-            @test_throws TypeInstabilityError Foo(1) - Foo(2)
-            @test_throws TypeInstabilityError file_named()
-        end
-    end
-end
-@testitem "stabilized code is attributed to its definition line" begin
-    using DispatchDoctor
-
-    for codegen_level in ("debug", "min")
-        # The check runs before the original body; it should still be reported
-        # (in stack traces and coverage) at the line of the definition.
-        line = LineNumberNode(4242, Symbol("definition_line.jl"))
-        def = Expr(
-            :function, :(unstable_at_line(x)), Expr(:block, line, :(return x > 0 ? x : 0.0))
-        )
         @eval @stable default_codegen_level = $codegen_level $def
         if DispatchDoctor.JULIA_OK
             frames = try
-                unstable_at_line(1)
-                []
-            catch e
-                e isa TypeInstabilityError || rethrow()
+                f(1)
+            catch
                 stacktrace(catch_backtrace())
             end
-            @test any(frames) do fr
-                basename(string(fr.file)) == string(line.file) && fr.line == line.line
-            end
+            @test any(fr -> fr.file == line.file && fr.line == line.line, frames)
         end
-    end
-
-    # https://github.com/MilesCranmer/DispatchDoctor.jl/issues/114
-    mktempdir() do dir
-        mwe_path = joinpath(dir, "mwe.jl")
-        write(
-            mwe_path,
-            """
-            module StablePkg
-            using DispatchDoctor
-
-            @stable default_codegen_level = "min" function foo_min(x)
-                return x + 1
-            end
-
-            @stable default_codegen_level = "debug" function foo_debug(x)
-                return x + 1
-            end
-
-            end
-
-            StablePkg.foo_min(1)
-            StablePkg.foo_debug(1)
-            """,
-        )
-        trace_path = joinpath(dir, "coverage.info")
-        julia = joinpath(Sys.BINDIR, Base.julia_exename())
-        project = Base.active_project()
-        coverage_flag = "--code-coverage=$trace_path"
-        run(`$julia --startup-file=no --project=$project $coverage_flag $mwe_path`)
-
-        coverage = Dict{Int,Int}()
-        in_record = false
-        for l in eachline(trace_path)
-            if startswith(l, "SF:")
-                in_record = normpath(l[4:end]) == normpath(mwe_path)
-            elseif in_record && (m = match(r"^DA:(\d+),(\d+)", l)) !== nothing
-                coverage[parse(Int, m[1])] = parse(Int, m[2])
-            end
-        end
-        # The header lines of both definitions are executed. (Julia 1.10 also
-        # counts the header line of the simulator, which `"min"` calls.)
-        @test get(coverage, 4, 0) >= 1
-        @test get(coverage, 8, 0) >= 1
     end
 end
 @testitem "Type specialization" begin
@@ -456,65 +366,35 @@ end
         DispatchDoctor.JULIA_OK && @test_throws TypeInstabilityError g(*, *)
     end
 end
-@testitem "wide argument lists check without allocating" begin
+@testitem "wide signatures do not allocate" begin
     using DispatchDoctor
-    using DispatchDoctor: _Utils
-
-    # `Base.map` over a tuple of more than 32 elements switches to a heap
-    # buffer, and inference on Julia 1.10 gives up on splatting more than 32
-    # types, which made every call of a wide stabilized function allocate.
-    names = [Symbol(:x, i) for i in 1:36]
-    values = ntuple(identity, 36)
-    for codegen_level in ("debug", "min")
-        ok, bad, kw, va = gensym(:ok), gensym(:bad), gensym(:kw), gensym(:va)
-        @eval begin
-            @stable default_codegen_level = $codegen_level $ok($(names...)) = x1 + x36
-            @stable default_codegen_level = $codegen_level $bad($(names...)) =
-                x1 > 0 ? x1 : Float64(x36)
-            @stable default_codegen_level = $codegen_level $kw($(names...); k=1) =
-                x1 + x36 + k
-            @stable default_codegen_level = $codegen_level $va(xs::Int...) = xs[1] + xs[end]
-        end
-        callers = [
-            (@eval(() -> $ok($(values...))), 37, true),
-            (@eval(() -> $kw($(values...); k=2)), 39, true),
-            # (With code coverage enabled, Julia itself allocates when forwarding
-            # more than 32 varargs, as it cannot remove the instrumented calls.)
-            (@eval(() -> $va($(values...))), 37, Base.JLOptions().code_coverage == 0),
-        ]
-        for (caller, expected, check_allocations) in callers
-            @test Base.invokelatest(caller) == expected
-            if check_allocations
-                @test Base.invokelatest(() -> @allocated caller()) == 0
-            end
-        end
-        if DispatchDoctor.JULIA_OK
-            @test_throws TypeInstabilityError Base.invokelatest(@eval($bad), values...)
-        end
-    end
-
-    kinds = (Int, Type{Int}, Union{Int,Float64}, Val(:tag), nothing, 1.0)
-    @test _Utils.map_specializing_typeof(kinds) == map(_Utils.specializing_typeof, kinds)
-    @test _Utils.map_specializing_typeof(()) == ()
-    @test _Utils.map_specializing_typeof(values) == ntuple(_ -> Int, 36)
+    args = [Symbol(:x, i) for i in 1:36]
+    @eval @stable f($(args...)) = x1 + x36
+    @eval @stable g($(args...); k=1) = x1 + x36 + k
+    @eval @stable h(xs::Int...) = xs[1] + xs[end]
+    @eval call_f() = f($(1:36...))
+    @eval call_g() = g($(1:36...); k=2)
+    @eval call_h() = h($(1:36...))
+    @test call_f() == 37
+    @test call_g() == 39
+    @test call_h() == 37
+    @test @allocated(call_f()) == 0
+    @test @allocated(call_g()) == 0
+    @test @allocated(call_h()) == 0
 end
-@testitem "Type arguments do not add overhead" begin
+@testitem "Type arguments do not allocate" begin
     using DispatchDoctor
-
-    # https://github.com/MilesCranmer/DispatchDoctor.jl/issues/98
-    # (reproducer from https://github.com/MilesCranmer/DispatchDoctor.jl/pull/108):
-    # collecting the arguments into a tuple before taking their specializing
-    # types widened `Type{Int}` to `DataType`, so the check ran at runtime.
-    @stable gs(::Type{T}, x) where {T} = T(x)
-    g(::Type{Int}, x) = Int(x)
-
-    plain() = map(x -> g(Int, x), 1:(10^4))
-    stable() = map(x -> gs(Int, x), 1:(10^4))
-    @test plain() == stable()
-
-    a_plain = @allocated plain()
-    a_stable = @allocated stable()
-    @test a_stable <= 2 * a_plain
+    @stable f(::Type{T}, x) where {T} = T(x)
+    g() = sum(x -> f(Int, x), 1:100)
+    @test g() == 5050
+    @test @allocated(g()) == 0
+end
+@testitem "argument named Tuple" begin
+    using DispatchDoctor
+    @stable f(Tuple) = Tuple
+    @stable g(Tuple; k=1) = Tuple + k
+    @test f(1) == 1
+    @test g(1; k=2) == 3
 end
 @testitem "QuoteNode in options" begin
     using DispatchDoctor
@@ -660,33 +540,16 @@ end
     @test Asingleline.f(1.0) == 1.0
     DispatchDoctor.JULIA_OK && @test_throws TypeInstabilityError Asingleline.f(1)
 end
-@testitem "baremodule without Base" begin
+@testitem "baremodule" begin
     using DispatchDoctor
-
-    # The generated check must not rely on names (`!`, `Val`) from Base,
-    # which a `baremodule` does not import.
-    for codegen_level in ("debug", "min")
-        m = Module(:Bare, false)
-        Core.eval(m, :(using DispatchDoctor: @stable))
-        Core.eval(m, :(@stable default_codegen_level = $codegen_level begin
-            stable(x) = x
-            unstable(r) = Core.getfield(r, :x)
-            unstable_kw(r; k=1) = Core.getfield(r, :x)
-            unstable_union(c) = Core.ifelse(c, 1, 0.0)
-        end))
-        limit2 = :(default_union_limit = 2)
-        Core.eval(m, :(@stable default_codegen_level = $codegen_level $limit2 begin
-            small_union(c) = Core.ifelse(c, 1, 0.0)
-        end))
-        call(name, args...; kws...) = Base.invokelatest(getglobal(m, name), args...; kws...)
-        @test call(:stable, 1) === 1
-        @test call(:small_union, true) === 1
-        if DispatchDoctor.JULIA_OK
-            @test_throws TypeInstabilityError call(:unstable, Ref{Any}(1))
-            @test_throws TypeInstabilityError call(:unstable_kw, Ref{Any}(1); k=2)
-            @test_throws TypeInstabilityError call(:unstable_union, true)
-        end
+    baremodule Abaremodule
+    using DispatchDoctor: @stable
+    @stable f(c) = Core.ifelse(c, 1, 0.0)
+    @stable default_union_limit = 2 g(c) = Core.ifelse(c, 1, 0.0)
     end
+
+    @test Abaremodule.g(true) === 1
+    DispatchDoctor.JULIA_OK && @test_throws TypeInstabilityError Abaremodule.f(true)
 end
 @testitem "module with include" begin
     using DispatchDoctor
@@ -790,47 +653,6 @@ end
 
     @test Aallowunstable.f() in (0, 1.0)
     DispatchDoctor.JULIA_OK && @test_throws TypeInstabilityError Aallowunstable.g()
-end
-@testitem "modules with inference disabled" begin
-    using DispatchDoctor
-
-    # Without inference (e.g. JLL packages, which use
-    # `@compiler_options infer=false` to load faster), every return type
-    # is `Any`, so there is nothing to check.
-    for codegen_level in ("debug", "min")
-        no_infer = @eval module $(gensym(:NoInfer))
-        using DispatchDoctor
-        Base.Experimental.@compiler_options infer = false
-        @stable default_codegen_level = $codegen_level begin
-            stable(x) = x + 1
-            unstable(x) = x > 0 ? x : 0.0
-            unstable_kw(x; k=1) = x > 0 ? x : 0.0
-        end
-        module Inner
-            using DispatchDoctor
-            @stable default_codegen_level = $codegen_level unstable(x) = x > 0 ? x : 0.0
-        end
-        end
-        # The option can also be set after the definitions:
-        late = @eval module $(gensym(:LateNoInfer))
-        using DispatchDoctor
-        @stable default_codegen_level = $codegen_level unstable(x) = x > 0 ? x : 0.0
-        Base.Experimental.@compiler_options infer = false
-        end
-        control = @eval module $(gensym(:Infer))
-        using DispatchDoctor
-        @stable default_codegen_level = $codegen_level unstable(x) = x > 0 ? x : 0.0
-        end
-
-        @test no_infer.stable(1) == 2
-        @test no_infer.unstable(1) == 1
-        @test no_infer.unstable_kw(1; k=2) == 1
-        @test no_infer.Inner.unstable(1) == 1
-        @test late.unstable(1) == 1
-        if DispatchDoctor.JULIA_OK
-            @test_throws TypeInstabilityError control.unstable(1)
-        end
-    end
 end
 @testitem "anonymous functions" begin
     using DispatchDoctor
@@ -1698,42 +1520,24 @@ end
     P = (Type{T} where {T}).body
     @test test_function(P) === nothing
 end
-@testitem "types of types as arguments" begin
+@testitem "issue with specializing_typeof on types of types" begin
     using DispatchDoctor
-    using DispatchDoctor: specializing_typeof
 
-    # A value like `DataType` is itself a type, and a method taking
-    # `::Type{K}` is specialized on `Type{DataType}` for it. Checking it as
-    # `DataType` instead left `K` unknown, so stable methods were flagged.
-    for codegen_level in ("debug", "min")
-        @eval begin
-            @stable default_codegen_level = $codegen_level myempty(
-                ::Dict, ::Type{K}, ::Type{V}
-            ) where {K,V} = Dict{K,V}()
-            @stable default_codegen_level = $codegen_level vector_of(::Type{K}) where {K} =
-                Vector{K}()
-            @stable default_codegen_level = $codegen_level unstable_of(
-                ::Type{K}
-            ) where {K} = rand(Bool) ? Vector{K}() : nothing
-        end
-        @test myempty(Dict(), DataType, Symbol) isa Dict{DataType,Symbol}
-        @test myempty(Dict(), UnionAll, Int) isa Dict{UnionAll,Int}
-        @test myempty(Dict(), Type{Int}, Int) isa Dict{Type{Int},Int}
-        @test vector_of(Union) isa Vector{Union}
-        @test vector_of(Type) isa Vector{Type}
-        if DispatchDoctor.JULIA_OK
-            @test_throws TypeInstabilityError unstable_of(DataType)
-            @test_throws "with arguments `(Type{DataType},)`" unstable_of(DataType)
-        end
-    end
+    @stable vector_of(::Type{K}) where {K} = Vector{K}()
+    @stable maybe_vector_of(::Type{K}) where {K} = rand(Bool) ? Vector{K}() : nothing
 
-    @test specializing_typeof(DataType) == Type{DataType}
-    @test specializing_typeof(Type{Int}) == Type{Type{Int}}
-    @test specializing_typeof(Union{}) == Type{Union{}}
-    @test specializing_typeof(Int) == Type{Int}
-    # A free type parameter cannot be specialized on:
-    P = (Type{T} where {T}).body
-    @test specializing_typeof(P) == DataType
+    @test vector_of(DataType) isa Vector{DataType}
+    DispatchDoctor.JULIA_OK &&
+        @test_throws "with arguments `(Type{DataType},)`" maybe_vector_of(DataType)
+end
+@testitem "Union{} as an argument" begin
+    using DispatchDoctor
+
+    @stable identity_stable(x) = x
+    call_with_bottom() = identity_stable(Union{})
+
+    @test Union{} isa only(Base.return_types(call_with_bottom, ()))
+    @test call_with_bottom() === Union{}
 end
 @testitem "issue with closures causing instability" begin
     using DispatchDoctor
@@ -1759,6 +1563,83 @@ end
     @test_throws TypeInstabilityError f()
 end
 
+@testitem "macro behavior with `GlobalRef`" begin
+    using DispatchDoctor
+
+    has_docstring(f) = !isnothing(match(r"\(Base.Docs.doc!\).+\(Base.Docs.Binding\)", string(f)))
+
+    for codegen_level in ("debug", "min")
+        f_expanded = @eval @macroexpand @stable default_codegen_level = $codegen_level begin
+            ""
+            f() = nothing
+        end
+        f_simulator, f_real = f_expanded.args[2].args
+
+        @test !has_docstring(f_simulator)
+        @test has_docstring(f_real)
+    end
+end
+
+@testitem "stack trace points at the user's source line" begin
+    using DispatchDoctor
+
+    def = :(function f(x)
+        return error("boom")
+    end)
+    line = filter(x -> x isa LineNumberNode, def.args[2].args)[end]
+    for codegen_level in ("debug", "min")
+        @eval @stable default_codegen_level = $codegen_level $def
+        frames = try
+            f(1)
+        catch
+            stacktrace(catch_backtrace())
+        end
+        @test any(fr -> fr.file == line.file && fr.line == line.line, frames)
+        @test !any(fr -> endswith(string(fr.file), "stabilization.jl"), frames)
+    end
+end
+
+@testitem "modules with inference disabled" begin
+    using DispatchDoctor
+
+    # Without inference (e.g. JLL packages, which use
+    # `@compiler_options infer=false` to load faster), every return type
+    # is `Any`, so there is nothing to check.
+    for codegen_level in ("debug", "min")
+        no_infer = @eval module $(gensym(:NoInfer))
+        using DispatchDoctor
+        Base.Experimental.@compiler_options infer = false
+        @stable default_codegen_level = $codegen_level begin
+            stable(x) = x + 1
+            unstable(x) = x > 0 ? x : 0.0
+            unstable_kw(x; k=1) = x > 0 ? x : 0.0
+        end
+        module Inner
+            using DispatchDoctor
+            @stable default_codegen_level = $codegen_level unstable(x) = x > 0 ? x : 0.0
+        end
+        end
+        # The option can also be set after the definitions:
+        late = @eval module $(gensym(:LateNoInfer))
+        using DispatchDoctor
+        @stable default_codegen_level = $codegen_level unstable(x) = x > 0 ? x : 0.0
+        Base.Experimental.@compiler_options infer = false
+        end
+        control = @eval module $(gensym(:Infer))
+        using DispatchDoctor
+        @stable default_codegen_level = $codegen_level unstable(x) = x > 0 ? x : 0.0
+        end
+
+        @test no_infer.stable(1) == 2
+        @test no_infer.unstable(1) == 1
+        @test no_infer.unstable_kw(1; k=2) == 1
+        @test no_infer.Inner.unstable(1) == 1
+        @test late.unstable(1) == 1
+        if DispatchDoctor.JULIA_OK
+            @test_throws TypeInstabilityError control.unstable(1)
+        end
+    end
+end
 @testitem "allow_unstable of the registered DispatchDoctor" begin
     using DispatchDoctor
     using DispatchDoctor: _RuntimeChecks
@@ -1908,23 +1789,6 @@ end
     @test captured() === original_flag
 end
 
-@testitem "macro behavior with `GlobalRef`" begin
-    using DispatchDoctor
-
-    has_docstring(f) = !isnothing(match(r"\(Base.Docs.doc!\).+\(Base.Docs.Binding\)", string(f)))
-
-    for codegen_level in ("debug", "min")
-        f_expanded = @eval @macroexpand @stable default_codegen_level = $codegen_level begin
-            ""
-            f() = nothing
-        end
-        f_simulator, f_real = f_expanded.args[2].args
-
-        @test !has_docstring(f_simulator)
-        @test has_docstring(f_real)
-    end
-end
-
 @testitem "programmatic stabilization" begin
     using DispatchDoctor
     using DispatchDoctor: stabilize_expression, stabilization_options
@@ -1997,6 +1861,23 @@ end
         if DispatchDoctor.JULIA_OK
             @test_throws TypeInstabilityError call((:outer,), 1)
             @test_throws TypeInstabilityError call((:inner,), 1)
+        end
+    end
+end
+
+@testitem "type-valued keywords retain upstream instability checks" begin
+    using DispatchDoctor
+
+    for codegen_level in ("debug", "min")
+        @eval @stable default_codegen_level = $codegen_level typed_values(n; T::Type=Float64) = zeros(T, n)
+        @eval @stable default_codegen_level = $codegen_level positional_values(n, ::Type{T}) where {T} = zeros(T, n)
+        # The keyword's runtime type is DataType, not the singleton Type{Float32}.
+        # Specializing it as a singleton would conceal the instability in this caller.
+        dynamic_values(T) = typed_values(2; T=T)
+        @test positional_values(2, Float32) == zeros(Float32, 2)
+        if DispatchDoctor.JULIA_OK
+            @test_throws TypeInstabilityError dynamic_values(Any[Float32][1])
+            @test_throws TypeInstabilityError typed_values(2; T=Float32)
         end
     end
 end

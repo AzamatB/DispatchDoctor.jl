@@ -9,7 +9,6 @@ using .._Utils:
     map_specializing_typeof,
     _promote_op,
     is_function_name_compatible,
-    get_first_source_info,
     sanitize_arg_for_stability_check,
     extract_symbol,
     type_instability,
@@ -186,7 +185,7 @@ function _stabilizing_include(m::Module, path; kws...)
 end
 
 function _stabilize_module(ex, downward_metadata; calling_module::Module=Core.Main, kws...)
-    # (The body is last: newer parsers put a syntax version before the other arguments.)
+    # The module body is last; preserve any parser-provided syntax-version argument.
     stabilized_args = map(
         e -> _stabilize_all(e, DownwardMetadata(); calling_module, kws...),
         ex.args[end].args,
@@ -205,15 +204,6 @@ end
 
 _show_warning(w::TypeInstabilityWarning) = (@warn w; nothing)
 _construct_pairs(x, y) = x .=> y
-
-"""Expression for the specializing type of one argument (a tuple of them for `xs...`)."""
-function _specializing_typeof_expr(arg)
-    if arg isa Expr && arg.head == :(...) && length(arg.args) == 1
-        return Expr(:(...), :($(map_specializing_typeof)($(only(arg.args)))))
-    else
-        return :($(specializing_typeof)($arg))
-    end
-end
 
 function _stabilize_fnc(
     fex::Expr,
@@ -235,11 +225,11 @@ function _stabilize_fnc(
     func_simulator = splitdef(deepcopy(fex))
 
     # Load any information about the source
-    searched_source_info = get_first_source_info(fex)
-    source_line = if searched_source_info isa LineNumberNode
-        searched_source_info
-    else
-        source_info
+    source_line = source_info
+    body = func[:body]
+    if Meta.isexpr(body, :block) && get(body.args, 1, nothing) isa LineNumberNode
+        source_line = body.args[1]
+        func[:body] = Expr(:block, body.args[2:end]...)
     end
     source_info = if source_line isa LineNumberNode
         string(source_line.file, ":", source_line.line)
@@ -306,11 +296,13 @@ function _stabilize_fnc(
         error("Unknown mode: $mode. Please use \"error\" or \"warn\".")
     end
 
-    # Take the specializing type of each argument where it is named, rather than
-    # first collecting the values into a tuple (which widens a `Type{T}` value to
-    # `DataType`) and mapping over it (which allocates beyond 32 elements), and
-    # pass them to inference as one `Tuple` type rather than splatting them.
-    typeof_args = map(_specializing_typeof_expr, arg_symbols)
+    typeof_args = map(arg_symbols) do arg
+        if Meta.isexpr(arg, :(...))
+            :($(map_specializing_typeof)($(only(arg.args)))...)
+        else
+            :($(specializing_typeof)($arg))
+        end
+    end
     infer = if isempty(kwarg_symbols)
         :($(_promote_op)($simulator, $(Tuple){$(typeof_args...)}))
     else
@@ -329,10 +321,6 @@ function _stabilize_fnc(
     caller = if codegen_level == "debug"
         # We duplicate entire body, so `@code_warntype` works
         body = func[:body]
-        if source_line isa LineNumberNode && _starts_with(body, source_line)
-            # (The wrapper body below already starts at this line.)
-            body = Expr(:block, body.args[2:end]...)
-        end
         # and we also destructure the signature
         Expr(:block, destructurings..., body)
     elseif isempty(kwarg_symbols)
@@ -342,31 +330,22 @@ function _stabilize_fnc(
     end
 
     ignore = haskey(func, :name) ? :($(ignore_function)(var"#self#")) : :(false)
-    # (Qualified, as the calling module may be a `baremodule` without Base.)
-    not = GlobalRef(Base, :!)
-    # Only checked once the return type is found to be unstable, and at
-    # runtime, as the module's `infer=false` may be set after this definition:
+
+    # Check at runtime because infer=false may be set after the definition.
     this_module = Expr(:macrocall, GlobalRef(Base, Symbol("@__MODULE__")), nothing)
 
-    # The simulator keeps the original body, including its source lines:
-    # macros such as `@__DIR__`, `@__FILE__` and command literals expand
-    # using their `LineNumberNode`, so stripping them would change (or break)
-    # the code that is inferred.
     func_simulator[:name] = simulator
     func[:body] = @q begin
+        $(source_line)
         $T = $infer
         if $(checker) &&
-            $not($ignore) &&
+            $(!)($ignore) &&
             $(checking_enabled)() &&
             $(inference_enabled)($this_module)
             $err
         end
 
         $(caller)
-    end
-    if source_line isa LineNumberNode
-        # Attribute the check (and coverage of the definition) to its source line
-        pushfirst!(func[:body].args, source_line)
     end
 
     func_simulator_ex = combinedef(func_simulator)
@@ -383,11 +362,6 @@ function _stabilize_fnc(
         $(Base).@__doc__ $(func_ex)
     end
     return final_ex, UpwardMetadata(; matching_function=true)  # Clean metadata – all macros were consumed
-end
-
-function _starts_with(body, line::LineNumberNode)
-    body isa Expr && body.head == :block && !isempty(body.args) || return false
-    return body.args[1] == line
 end
 
 """
