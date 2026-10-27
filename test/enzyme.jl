@@ -39,7 +39,6 @@ end
         using DispatchDoctor._Utils:
             specializing_typeof,
             map_specializing_typeof,
-            specializing_kwargs_typeof,
             _promote_op,
             type_instability,
             type_instability_limit_unions
@@ -56,7 +55,6 @@ end
                 _construct_pairs,
                 specializing_typeof,
                 map_specializing_typeof,
-                specializing_kwargs_typeof,
                 _promote_op,
                 type_instability,
                 type_instability_limit_unions,

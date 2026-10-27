@@ -7,7 +7,6 @@ import DispatchDoctor._Stabilization: _show_warning, _construct_pairs
 import DispatchDoctor._Utils:
     specializing_typeof,
     map_specializing_typeof,
-    specializing_kwargs_typeof,
     _promote_op,
     type_instability,
     type_instability_limit_unions
@@ -19,7 +18,6 @@ import DispatchDoctor._Utils:
 # Issue #46
 @non_differentiable specializing_typeof(::Any)
 @non_differentiable map_specializing_typeof(::Any...)
-@non_differentiable specializing_kwargs_typeof(::Any...)
 @non_differentiable _promote_op(::Any...)
 @non_differentiable type_instability(::Any...)
 @non_differentiable type_instability_limit_unions(::Any...)
