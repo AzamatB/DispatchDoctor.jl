@@ -14,7 +14,7 @@ using .._Utils:
     type_instability,
     type_instability_limit_unions,
     has_nospecialize
-using .._Errors: TypeInstabilityError, TypeInstabilityWarning
+using .._Errors: TypeInstabilityError, TypeInstabilityWarning, argument_types
 using .._Interactions:
     ignore_function,
     get_macro_behavior,
@@ -275,8 +275,8 @@ function _stabilize_fnc(
             $(TypeInstabilityError)(
                 $(print_name),
                 $(source_info),
-                ($(arg_symbols...),),
-                (; $(kwarg_symbols...)),
+                $(argument_types)(($(arg_symbols...),)),
+                $(typeof)((; $(kwarg_symbols...))),
                 ($(_construct_pairs)($(where_param_symbols), ($(where_param_symbols...),))),
                 $T,
             ),
@@ -286,8 +286,8 @@ function _stabilize_fnc(
             $(TypeInstabilityWarning)(
                 $(print_name),
                 $(source_info),
-                ($(arg_symbols...),),
-                (; $(kwarg_symbols...)),
+                $(argument_types)(($(arg_symbols...),)),
+                $(typeof)((; $(kwarg_symbols...))),
                 ($(_construct_pairs)($(where_param_symbols), ($(where_param_symbols...),))),
                 $T,
             ),

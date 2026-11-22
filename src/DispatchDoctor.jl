@@ -12,8 +12,11 @@ DispatchDoctor instead of replacing it.
 - 2: the registered DispatchDoctor's `allow_unstable` also pauses this fork's checks.
 - 3: the registered DispatchDoctor's flag is captured once, when either package loads,
   so the checks take no lock (threads can run checked code inside its `allow_unstable`).
+- 4: a `TypeInstabilityError` or `TypeInstabilityWarning` keeps the types of the call's
+  arguments (`arg_types`, `kwarg_types`), not their values, so showing one after the call
+  has unwound never reads them.
 """
-const DISPATCHCHECKUP_PATCHLEVEL = 3
+const DISPATCHCHECKUP_PATCHLEVEL = 4
 
 include("utils.jl")
 include("errors.jl")
